@@ -1,0 +1,269 @@
+/* =====================================================================
+   PINBALL ARCADE - single file (pinball.js)
+   Usage: any HTML page with  <script src="pinball.js"></script>
+   Builds its own menu, game canvas, styles and leaderboards.
+
+   LICENSING NOTE: tables use original colors/layouts only. Names are
+   placeholders - get licenses (or swap names) before going public.
+   ADD A MACHINE: add an object to TABLES below.
+   GLOBAL LEADERBOARD: set CONFIG.leaderboardUrl to your own endpoint
+   (GET ?table=id -> [{n,s}], POST {table,n,s}). Otherwise scores are
+   saved per-browser in localStorage.
+   ===================================================================== */
+(function () {
+  'use strict';
+  const CONFIG = { siteTitle: 'PINBALL ARCADE', balls: 3, leaderboardUrl: null };
+
+  const TABLES = [
+    { id: 'dolly', name: 'Dolly Parton Pinball', tag: 'Rhinestones & Rock',
+      bg: ['#3a0a2e', '#120414'], accent: '#ff5fb0', glow: '#ffd36b',
+      bumpers: [[120, 250, 24], [240, 230, 24], [180, 330, 24], [100, 400, 20], [260, 390, 20]] },
+    { id: 'trek', name: 'Star Trek Pinball', tag: 'Boldly Go',
+      bg: ['#06163a', '#02050f'], accent: '#4ab8ff', glow: '#e8f4ff',
+      bumpers: [[180, 240, 26], [110, 320, 22], [250, 320, 22], [180, 410, 22], [70, 230, 18], [290, 230, 18]] },
+    { id: 'ghost', name: 'Ghostbusters Pinball', tag: 'Who Ya Gonna Call?',
+      bg: ['#0b2a1a', '#030a06'], accent: '#5dff8a', glow: '#ff6a3d',
+      bumpers: [[130, 240, 24], [230, 260, 24], [180, 350, 28], [90, 380, 18], [270, 380, 18]] },
+    { id: 'bttf', name: 'Back to the Future Pinball', tag: '88 Miles Per Hour',
+      bg: ['#2a1204', '#0c0502'], accent: '#ff9a2e', glow: '#7fe7ff',
+      bumpers: [[110, 260, 22], [250, 260, 22], [180, 320, 26], [140, 410, 20], [220, 410, 20]] },
+  ];
+
+  // ---------- styles & DOM ----------
+  const css = `
+  html,body{margin:0;height:100%;background:#07070c;color:#fff;font-family:system-ui,Segoe UI,Arial,sans-serif;overflow:hidden}
+  #pa-menu{position:fixed;inset:0;overflow:auto;padding:24px;box-sizing:border-box;background:radial-gradient(circle at 50% 0,#1b1b3a,#07070c 70%)}
+  #pa-menu h1{text-align:center;letter-spacing:6px;font-size:clamp(26px,5vw,52px);margin:10px 0 4px;text-shadow:0 0 20px #7a7aff}
+  #pa-menu .sub{text-align:center;opacity:.6;margin-bottom:24px}
+  .pa-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;max-width:1100px;margin:0 auto}
+  .pa-card{border-radius:16px;padding:18px;border:2px solid;cursor:pointer;transition:transform .15s,box-shadow .15s}
+  .pa-card:hover{transform:translateY(-4px)}
+  .pa-card h2{margin:0 0 2px;font-size:20px}.pa-card .t{opacity:.7;font-size:13px;margin-bottom:10px}
+  .pa-card ol{margin:8px 0 12px;padding-left:22px;font-size:14px;min-height:60px}
+  .pa-card button{width:100%;padding:10px;border:0;border-radius:10px;font-weight:700;cursor:pointer;font-size:15px;color:#000}
+  #pa-game{position:fixed;inset:0;display:none;background:#000}
+  #pa-game canvas{width:100%;height:100%;display:block}
+  #pa-back{position:fixed;top:10px;left:10px;z-index:5;display:none;padding:8px 14px;border-radius:8px;border:1px solid #fff5;background:#0008;color:#fff;cursor:pointer}
+  .pa-help{text-align:center;opacity:.5;font-size:13px;margin-top:26px}`;
+  const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
+  document.title = CONFIG.siteTitle;
+  const menu = el('div', 'pa-menu'), gameWrap = el('div', 'pa-game'), back = el('button', 'pa-back');
+  back.textContent = '\u2190 Menu';
+  const canvas = document.createElement('canvas'); gameWrap.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  function el(t, id) { const e = document.createElement(t); e.id = id; document.body.appendChild(e); return e; }
+
+  // ---------- leaderboards ----------
+  const lbKey = id => 'pinball_lb_' + id;
+  function localScores(id) { try { return JSON.parse(localStorage.getItem(lbKey(id))) || []; } catch (e) { return []; } }
+  async function getScores(id) {
+    if (CONFIG.leaderboardUrl) {
+      try { const r = await fetch(CONFIG.leaderboardUrl + '?table=' + id); return await r.json(); } catch (e) {}
+    }
+    return localScores(id);
+  }
+  async function addScore(id, n, s) {
+    const list = localScores(id); list.push({ n, s });
+    list.sort((a, b) => b.s - a.s); list.length = Math.min(list.length, 10);
+    try { localStorage.setItem(lbKey(id), JSON.stringify(list)); } catch (e) {}
+    if (CONFIG.leaderboardUrl) {
+      try { await fetch(CONFIG.leaderboardUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: id, n, s }) }); } catch (e) {}
+    }
+  }
+  const esc = s => String(s).replace(/[<>&"]/g, '');
+
+  // ---------- menu ----------
+  async function buildMenu() {
+    menu.innerHTML = `<h1>${CONFIG.siteTitle}</h1><div class="sub">Choose your machine</div><div class="pa-grid"></div>
+    <div class="pa-help">Flippers: Left/Right arrows, Z and / (or tap left/right side) &bull; Hold Space (or tap bottom) to pull the plunger, release to launch</div>`;
+    const grid = menu.querySelector('.pa-grid');
+    for (const t of TABLES) {
+      const top = (await getScores(t.id)).slice(0, 3);
+      const rows = top.length ? top.map(x => `<li>${esc(x.n)} &mdash; ${Number(x.s).toLocaleString()}</li>`).join('') : '<li style="list-style:none;opacity:.5">No scores yet</li>';
+      const c = document.createElement('div'); c.className = 'pa-card';
+      c.style.cssText = `background:linear-gradient(160deg,${t.bg[0]},${t.bg[1]});border-color:${t.accent};box-shadow:0 0 18px ${t.accent}44`;
+      c.innerHTML = `<h2 style="color:${t.accent}">${esc(t.name)}</h2><div class="t">${esc(t.tag)}</div><b style="font-size:12px;opacity:.7">HIGH SCORES</b><ol>${rows}</ol><button style="background:${t.accent}">PLAY</button>`;
+      c.onclick = () => startGame(t);
+      grid.appendChild(c);
+    }
+  }
+
+  // ---------- game ----------
+  const W = 400, H = 720, R = 8, G = 900;
+  let T = null, running = false, last = 0, ball, score, ballsLeft, mult, hits, saveUntil, launchPower, charging, over, msg, msgT;
+  const keys = { l: false, r: false };
+  const fl = [
+    { px: 130, py: 640, len: 62, rest: 0.5, act: -0.45, a: 0.5, dir: 1 },
+    { px: 270, py: 640, len: 62, rest: Math.PI - 0.5, act: Math.PI + 0.45, a: Math.PI - 0.5, dir: -1 },
+  ];
+  let walls = [];
+  (function buildWalls() {
+    const w = (a, b, c, d) => walls.push([a, b, c, d]);
+    w(0, 200, 0, 560); w(400, 200, 400, 700); w(0, 560, 128, 636); w(360, 560, 272, 636);
+    w(360, 260, 360, 700); w(360, 700, 400, 700);
+    let px = 0, py = 200;
+    for (let i = 1; i <= 24; i++) {
+      const ang = Math.PI + (Math.PI * i) / 24, x = 200 + 200 * Math.cos(ang), y = 200 + 200 * Math.sin(ang);
+      w(px, py, x, y); px = x; py = y;
+    }
+  })();
+
+  function newBall() {
+    ball = { x: 380, y: 670, vx: 0, vy: 0 }; charging = false; launchPower = 0; saveUntil = 0;
+  }
+  function flash(t) { msg = t; msgT = performance.now() + 1800; }
+
+  function startGame(t) {
+    T = t; score = 0; ballsLeft = CONFIG.balls; mult = 1; hits = 0; over = false;
+    newBall(); menu.style.display = 'none'; gameWrap.style.display = 'block'; back.style.display = 'block';
+    resize(); running = true; last = performance.now(); requestAnimationFrame(loop);
+  }
+  async function exitToMenu() {
+    running = false; gameWrap.style.display = 'none'; back.style.display = 'none';
+    await buildMenu(); menu.style.display = 'block';
+  }
+  back.onclick = exitToMenu;
+
+  function collide(b, ax, ay, bx, by, th, e, sv) {
+    const dx = bx - ax, dy = by - ay;
+    const t = Math.max(0, Math.min(1, ((b.x - ax) * dx + (b.y - ay) * dy) / (dx * dx + dy * dy)));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    let nx = b.x - cx, ny = b.y - cy; const d = Math.hypot(nx, ny), m = R + th;
+    if (d >= m || d === 0) return false;
+    nx /= d; ny /= d; b.x = cx + nx * m; b.y = cy + ny * m;
+    let sx = 0, sy = 0; if (sv) { const v = sv(cx, cy); sx = v[0]; sy = v[1]; }
+    const vn = (b.vx - sx) * nx + (b.vy - sy) * ny;
+    if (vn < 0) { b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny; }
+    return true;
+  }
+
+  function step(dt) {
+    // flippers
+    fl.forEach((f, i) => {
+      const target = (i === 0 ? keys.l : keys.r) ? f.act : f.rest, old = f.a;
+      const sp = 20 * dt, diff = target - f.a;
+      f.a += Math.abs(diff) < sp ? diff : Math.sign(diff) * sp;
+      f.w = (f.a - old) / dt;
+    });
+    if (charging) launchPower = Math.min(1, launchPower + dt * 1.2);
+    ball.vy += G * dt; ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+    const sp = Math.hypot(ball.vx, ball.vy); if (sp > 1500) { ball.vx *= 1500 / sp; ball.vy *= 1500 / sp; }
+    for (const s of walls) collide(ball, s[0], s[1], s[2], s[3], 2, 0.45);
+    for (const f of fl) {
+      const ex = f.px + Math.cos(f.a) * f.len, ey = f.py + Math.sin(f.a) * f.len;
+      collide(ball, f.px, f.py, ex, ey, 6, 0.3, (cx, cy) => [-f.w * (cy - f.py), f.w * (cx - f.px)]);
+    }
+    for (const bp of T.bumpers) {
+      const dx = ball.x - bp[0], dy = ball.y - bp[1], d = Math.hypot(dx, dy), m = R + bp[2];
+      if (d < m && d > 0) {
+        const nx = dx / d, ny = dy / d; ball.x = bp[0] + nx * m; ball.y = bp[1] + ny * m;
+        const vn = ball.vx * nx + ball.vy * ny; if (vn < 0) { ball.vx -= 2 * vn * nx; ball.vy -= 2 * vn * ny; }
+        ball.vx += nx * 380; ball.vy += ny * 380;
+        score += 100 * mult; bp.hit = performance.now();
+        if (++hits % 10 === 0 && mult < 5) { mult++; flash('BONUS x' + mult + '!'); }
+      }
+    }
+    if (ball.y < 250 && ball.x > 365) saveUntil = saveUntil || performance.now() + 8000;
+    if (ball.y > 740) drain();
+  }
+
+  function drain() {
+    if (performance.now() < saveUntil) { flash('BALL SAVED'); newBall(); return; }
+    ballsLeft--; mult = 1; hits = 0;
+    if (ballsLeft <= 0) { endGame(); } else { flash('BALL LOST'); newBall(); }
+  }
+  async function endGame() {
+    over = true; running = false; draw();
+    const board = await getScores(T.id);
+    if (score > 0 && (board.length < 10 || score > board[board.length - 1].s)) {
+      const n = (prompt('GAME OVER! Score ' + score.toLocaleString() + '\nEnter your initials for the leaderboard:', 'AAA') || 'AAA').toUpperCase().slice(0, 3);
+      await addScore(T.id, n, score);
+    }
+    exitToMenu();
+  }
+
+  function loop(now) {
+    if (!running) return;
+    let dt = Math.min(0.033, (now - last) / 1000); last = now;
+    const n = 6; for (let i = 0; i < n; i++) step(dt / n);
+    draw(); requestAnimationFrame(loop);
+  }
+
+  // ---------- drawing ----------
+  let scale = 1, ox = 0, oy = 0;
+  function resize() {
+    canvas.width = innerWidth; canvas.height = innerHeight;
+    scale = Math.min(canvas.width / W, canvas.height / H); ox = (canvas.width - W * scale) / 2; oy = (canvas.height - H * scale) / 2;
+  }
+  addEventListener('resize', () => { if (T) resize(); });
+
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, ox, oy);
+    const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, T.bg[0]); g.addColorStop(1, T.bg[1]);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.lineCap = 'round'; ctx.strokeStyle = T.accent; ctx.shadowColor = T.accent; ctx.shadowBlur = 10; ctx.lineWidth = 4;
+    for (const s of walls) { ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.stroke(); }
+    // bumpers
+    const now = performance.now();
+    for (const b of T.bumpers) {
+      const lit = now - (b.hit || 0) < 140;
+      ctx.shadowColor = T.glow; ctx.shadowBlur = lit ? 30 : 12;
+      ctx.fillStyle = lit ? T.glow : T.accent; ctx.beginPath(); ctx.arc(b[0], b[1], b[2], 0, 7); ctx.fill();
+      ctx.fillStyle = '#000a'; ctx.beginPath(); ctx.arc(b[0], b[1], b[2] * 0.55, 0, 7); ctx.fill();
+    }
+    // flippers
+    ctx.shadowBlur = 8; ctx.strokeStyle = T.glow; ctx.lineWidth = 12;
+    for (const f of fl) { ctx.beginPath(); ctx.moveTo(f.px, f.py); ctx.lineTo(f.px + Math.cos(f.a) * f.len, f.py + Math.sin(f.a) * f.len); ctx.stroke(); }
+    // plunger power
+    if (charging) { ctx.fillStyle = T.glow; ctx.fillRect(366, 700 - launchPower * 60, 28, launchPower * 60); }
+    // ball
+    ctx.shadowColor = '#fff'; ctx.shadowBlur = 12;
+    const bg = ctx.createRadialGradient(ball.x - 3, ball.y - 3, 1, ball.x, ball.y, R);
+    bg.addColorStop(0, '#fff'); bg.addColorStop(1, '#889'); ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, R, 0, 7); ctx.fill();
+    // HUD
+    ctx.shadowBlur = 0; ctx.fillStyle = '#fff'; ctx.font = 'bold 20px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(score.toLocaleString(), 200, 40);
+    ctx.font = '12px monospace'; ctx.fillStyle = T.accent;
+    ctx.fillText(T.name.toUpperCase() + '  |  BALL ' + Math.min(CONFIG.balls, CONFIG.balls - ballsLeft + 1) + '/' + CONFIG.balls + '  |  x' + mult, 200, 58);
+    if (msg && now < msgT) { ctx.font = 'bold 26px sans-serif'; ctx.fillStyle = T.glow; ctx.fillText(msg, 200, 150); }
+    if (!ball.vx && !ball.vy || ball.x > 365 && ball.y > 600) {
+      ctx.font = '12px sans-serif'; ctx.fillStyle = '#fffa'; ctx.fillText('HOLD SPACE / TAP BOTTOM, RELEASE TO LAUNCH', 200, 700 - 30 + 0);
+    }
+    if (over) { ctx.font = 'bold 40px sans-serif'; ctx.fillStyle = '#fff'; ctx.fillText('GAME OVER', 200, 360); }
+  }
+
+  // ---------- input ----------
+  const inLane = () => ball.x > 365 && ball.y > 600;
+  function launch() {
+    if (charging && inLane()) ball.vy = -(850 + launchPower * 500);
+    charging = false; launchPower = 0;
+  }
+  addEventListener('keydown', e => {
+    if (!running) return;
+    if (['ArrowLeft', 'KeyZ', 'ShiftLeft'].includes(e.code)) keys.l = true;
+    if (['ArrowRight', 'Slash', 'ShiftRight'].includes(e.code)) keys.r = true;
+    if (e.code === 'Space') { e.preventDefault(); if (inLane()) charging = true; }
+    if (e.code === 'Escape') exitToMenu();
+  });
+  addEventListener('keyup', e => {
+    if (['ArrowLeft', 'KeyZ', 'ShiftLeft'].includes(e.code)) keys.l = false;
+    if (['ArrowRight', 'Slash', 'ShiftRight'].includes(e.code)) keys.r = false;
+    if (e.code === 'Space' && running) launch();
+  });
+  function touches(e) {
+    if (!running) return; e.preventDefault();
+    keys.l = keys.r = false;
+    let plunge = false;
+    for (const t of e.touches) {
+      if (t.clientY > innerHeight * 0.85) plunge = true;
+      else if (t.clientX < innerWidth / 2) keys.l = true; else keys.r = true;
+    }
+    if (plunge && inLane()) charging = true; else if (!plunge && charging) launch();
+  }
+  ['touchstart', 'touchmove', 'touchend', 'touchcancel'].forEach(ev => canvas.addEventListener(ev, touches, { passive: false }));
+  addEventListener('blur', () => { keys.l = keys.r = false; });
+
+  buildMenu();
+})();
